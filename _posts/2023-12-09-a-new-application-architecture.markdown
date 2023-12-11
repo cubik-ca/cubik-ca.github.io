@@ -29,6 +29,14 @@ Linux patching. So the savings of replacing that cluster with a SaaS offering go
 just the monetary savings (of which there is a modest amount), but also frees up a little
 bit of sysadmin time too every month.
 
+### Resiliency
+
+How many of your applications run with little to no redundancy? Are there databases in your
+organization that would cause irreparable harm if they were to be corrupted or damaged?
+How frequent are your planned maintenance outages? How about your unplanned ones? All of these
+questions refer to resiliency, the ability to withstand difficult conditions, such as network
+outages, hardware failures, viruses and malware, etc.
+
 ### Scalability
 
 As an architect, perhaps my biggest challenge is preparing for large releases and new business.
@@ -37,13 +45,34 @@ will be limited by the existing infrastructure and architecture, and that no amo
 throwing money at the problem will solve it faster. There is one very good solution, and
 that is to build scalable applications from the beginning.
 
-### Resiliency
-:was
-How many of your applications run with little to no redundancy? Are there databases in your
-organization that would cause irreparable harm if they were to be corrupted or damaged?
-How frequent are your planned maintenance outages? How about your unplanned ones? All of these
-questions refer to resiliency, the ability to withstand difficult conditions, such as network
-outages, hardware failures, viruses and malware, etc.
+### Performance
+
+It's rarely the case that performance problems are due to compute or memory shortages. Often it is an obscure resource
+shortage that causes the application to spend a long time waiting. Waiting for request threads to be available. Waiting
+for I/O. Blocking on things that it shouldn't block on. This architecture is completely asynchronous. Requests are _fast_,
+requiring only confirmation from the broker that the message has been received. In the rare case that data needs to be
+transferred asynchronously from the back-end, real-time push notifications can be used instead so that the client
+doesn't hog a request thread waiting for I/O.
+
+### Responsiveness
+
+Because we improve performance using parallelism, we'll also see an improvement in UI responsiveness. Using real-time
+notifications, we can request that the client update its state from the back-end. Users will immediately notice the difference
+in responsiveness.
+
+### Maintainability
+
+The DDD style makes it more difficult to make silly mistakes by transposing variables of the same type, e.g. (This is a
+bigger problem than you might think! When all IDs are, e.g., GUIDs, what happens when you use the wrong ID value in a query?)
+It also is much more comprehensible, since the type of an object also tells us its purpose. I strongly believe that when
+we think about objects using a DDD style and use event storming to determine its events, that we will produce more readable,
+and thus more maintainable code. The compiler will enforce a lot of conventions for us, too, so it will become second
+nature soon enough.
+
+### User Satisfaction
+
+It's hard to imagine making gains in all of the above and still having users that are unhappy. And if you do, I'm truly
+sorry for you.
 
 ## Architecture Diagram
 
@@ -648,6 +677,58 @@ be out-of-date when I read it, because it takes less than 250ms to call the get 
 statement itself is true: the aggregate does have a 250ms latency in MongoDB. But the spirit of the objection overlooks
 that this is an easy problem to overcome. Why do you need to reread the database? The client already knows the current state!
 Sometimes we only need to change our thinking a little. (More on this later when I talk about the web client)
+
+### BSON Encoder
+
+DDD enforcement will unfortunately make one thing more difficult, which is serializing. Most serializers rely on pretty loose
+object security to be able to create new objects from a textual representation. But DDD objects are practically immutable
+except by applying known events. This means that we'll have to help the serialization and deserialization out a bit.
+The serializer in question is the BSON serializer in `MongoDB.Bson`. This is the serializer used by the MongoDB client to
+write the aggregate's current state to the database. We marked the field `Id` in the base class as a `BsonId` (see above).
+This is only a small part of the serializer implementation. Let's look a little closer at the serializer for `ElectionName`.
+
+```c#
+public class ElectionNameSerializer : IBsonSerializer<ElectionName>
+{
+    object IBsonSerializer.Deserialize(BsonDeserializationContext context, BsonDeserializationArgs args)
+    {
+        return Deserialize(context, args);
+    }
+
+    public void Serialize(BsonSerializationContext context, BsonSerializationArgs args, ElectionName value)
+    {
+        context.Writer.WriteString(value);
+    }
+
+    public ElectionName Deserialize(BsonDeserializationContext context, BsonDeserializationArgs args)
+    {
+        var value = context.Reader.ReadString();
+        return ElectionName.FromString(value);
+    }
+
+    public void Serialize(BsonSerializationContext context, BsonSerializationArgs args, object? value)
+    {
+        switch (context.Writer.State)
+        {
+            case BsonWriterState.Name:
+                context.Writer.WriteString("name");
+                break;
+            case BsonWriterState.Value:
+                if (value == null) context.Writer.WriteNull();
+                else Serialize(context, args, (ElectionName) value);
+                break;
+        }
+    }
+
+    public Type ValueType => typeof(ElectionName);
+}
+```
+
+I put this at the bottom of `ElectionName.cs`. These four methods are required to implement `IBsonSerializer<T>`, which is
+invoked by MongoDb.Bson to complete serialization. The tricky bit was the `Serialize` method, which is actually called
+multiple times with different `context.Writer.State` values. We only need to serialize a field, not an entire object, so
+handling the states `Name` and `Value` seem sufficient to get the serialization done. These serializers obviously need to
+be made for every value object. They are associated with a value class using the following annotation: `[BsonSerializer(typeof(ElectionNameSerializer))]`
 
 ### Voting API
 
